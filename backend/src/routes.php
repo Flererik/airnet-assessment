@@ -36,7 +36,7 @@ if ($path === '/api/sources' && $method === 'GET') {
     respond(200, array('sources' => $repository->sources()));
 }
 if (preg_match('~^/api/tickets/([1-9][0-9]*)$~', $path, $matches) && $method === 'GET') {
-    $id = (int) $matches[1];
+    $id = ticketIdFromPath($matches[1]);
     session_write_close();
     if (getenv('DEMO_LATENCY') === '1') {
         usleep($id === 101 ? 1100000 : 100000);
@@ -49,12 +49,14 @@ if (preg_match('~^/api/tickets/([1-9][0-9]*)$~', $path, $matches) && $method ===
 }
 if (preg_match('~^/api/tickets/([1-9][0-9]*)/source$~', $path, $matches) && $method === 'POST') {
     requireCsrf();
-    $body = requestBody();
-    $sourceId = isset($body['source_id']) ? $body['source_id'] : null;
-    if (!is_int($sourceId) || $sourceId <= 0) {
-        respond(400, array('error' => 'invalid_source', 'message' => 'Выберите источник из справочника'));
-    }
-    $ticket = $repository->changeSource((int) $matches[1], $sourceId, $employee);
-    respond(200, array('ticket' => $ticket, 'history' => $repository->history($ticket['id'])));
+    // Право проверяется по сессии до чтения тела и любых изменений;
+    // поля клиента (employee_id, permissions и т.п.) не учитываются.
+    requirePermission($employee, 'FUNC_TICKETS_SOURCE_EDIT');
+    $id = ticketIdFromPath($matches[1]);
+    session_write_close();
+    $body = tryRequestBody();
+    $sourceId = $body !== null && array_key_exists('source_id', $body) && isDbId($body['source_id']) ? $body['source_id'] : null;
+    // Корректность источника проверяется в репозитории после проверок заявки и архива.
+    respond(200, $repository->changeSource($id, $sourceId, $employee));
 }
 respond(404, array('error' => 'not_found', 'message' => 'Маршрут не найден'));

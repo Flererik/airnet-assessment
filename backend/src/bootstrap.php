@@ -7,7 +7,23 @@ set_error_handler(function ($severity, $message, $file, $line) {
     }
     throw new ErrorException($message, 0, $severity, $file, $line);
 });
+class HttpError extends RuntimeException
+{
+    public $status;
+    public $errorCode;
+
+    public function __construct($status, $errorCode, $message)
+    {
+        parent::__construct($message);
+        $this->status = $status;
+        $this->errorCode = $errorCode;
+    }
+}
+
 set_exception_handler(function (Throwable $error) {
+    if ($error instanceof HttpError) {
+        respond($error->status, array('error' => $error->errorCode, 'message' => $error->getMessage()));
+    }
     error_log((string) $error);
     respond(500, array('error' => 'internal_error', 'message' => 'Не удалось обработать запрос'));
 });
@@ -93,6 +109,39 @@ function requireCsrf()
     if (empty($_SESSION['csrf']) || !hash_equals($_SESSION['csrf'], $token)) {
         respond(403, array('error' => 'csrf_invalid', 'message' => 'Обновите страницу'));
     }
+}
+
+/**
+ * Разбирает JSON-объект из тела запроса без немедленного ответа клиенту.
+ * Возвращает null, если тело не является JSON-объектом.
+ */
+function tryRequestBody()
+{
+    try {
+        $value = json_decode(file_get_contents('php://input'), true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $error) {
+        return null;
+    }
+    return is_array($value) ? $value : null;
+}
+
+/**
+ * id из PostgreSQL integer: положительное целое не больше 2147483647.
+ */
+function isDbId($value)
+{
+    return is_int($value) && $value > 0 && $value <= 2147483647;
+}
+
+/**
+ * id заявки из пути; слишком большие значения не существуют в integer-колонке.
+ */
+function ticketIdFromPath($raw)
+{
+    if (strlen($raw) > 10 || (int) $raw > 2147483647) {
+        throw new HttpError(404, 'not_found', 'Заявка не найдена');
+    }
+    return (int) $raw;
 }
 
 function requestBody()

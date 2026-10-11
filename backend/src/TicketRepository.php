@@ -12,17 +12,17 @@ class TicketRepository
 
     public function find($id)
     {
-        $row = pg_fetch_assoc(query('SELECT id, title, description, status, source_id, updated_at FROM tickets WHERE id=$1', array($id)));
+        // LEFT JOIN: заявка без источника должна загружаться с source = null.
+        $row = pg_fetch_assoc(query('SELECT t.id, t.title, t.description, t.status, t.updated_at, s.id AS source_id, s.name AS source_name FROM tickets t LEFT JOIN sources s ON s.id=t.source_id WHERE t.id=$1', array($id)));
         if (!$row) {
             return null;
         }
-        $source = pg_fetch_assoc(query('SELECT id, name FROM sources WHERE id=$1', array($row['source_id'])));
         return array(
             'id' => (int) $row['id'],
             'title' => $row['title'],
             'description' => $row['description'],
             'status' => $row['status'],
-            'source' => array('id' => (int) $source['id'], 'name' => $source['name']),
+            'source' => $row['source_id'] === null ? null : array('id' => (int) $row['source_id'], 'name' => $row['source_name']),
             'updated_at' => $row['updated_at'],
         );
     }
@@ -48,17 +48,43 @@ class TicketRepository
         return $rows;
     }
 
+    /**
+     * Меняет источник заявки и пишет историю в одной транзакции.
+     * Право FUNC_TICKETS_SOURCE_EDIT проверяется вызывающим кодом до этого метода.
+     * Порядок проверок: заявка существует -> не архивная -> источник корректен.
+     *
+     * @param int $id
+     * @param int|null $sourceId null, если клиент прислал некорректное значение
+     * @param array $employee сотрудник из серверной сессии
+     * @return array ['ticket' => ..., 'history' => ...]
+     */
     public function changeSource($id, $sourceId, array $employee)
     {
-        $ticket = pg_fetch_assoc(query('SELECT source_id FROM tickets WHERE id=$1', array($id)));
-        if (!$ticket) {
-            respond(404, array('error' => 'not_found', 'message' => 'Заявка не найдена'));
+        query('BEGIN');
+        try {
+            // FOR UPDATE сериализует параллельные изменения одной заявки,
+            // поэтому old_source_id в истории всегда равен фактическому прежнему значению.
+            $ticket = pg_fetch_assoc(query('SELECT status, source_id FROM tickets WHERE id=$1 FOR UPDATE', array($id)));
+            if (!$ticket) {
+                throw new HttpError(404, 'not_found', 'Заявка не найдена');
+            }
+            if ($ticket['status'] === 'archived') {
+                throw new HttpError(403, 'archived', 'Архивная заявка доступна только для чтения');
+            }
+            if ($sourceId === null || !pg_fetch_assoc(query('SELECT id FROM sources WHERE id=$1', array($sourceId)))) {
+                throw new HttpError(400, 'invalid_source', 'Выберите источник из справочника');
+            }
+            $oldSourceId = $ticket['source_id'] === null ? null : (int) $ticket['source_id'];
+            if ($oldSourceId !== $sourceId) {
+                query('UPDATE tickets SET source_id=$1, updated_at=clock_timestamp() WHERE id=$2', array($sourceId, $id));
+                query('INSERT INTO ticket_history(ticket_id, employee_id, old_source_id, new_source_id) VALUES($1,$2,$3,$4)', array($id, $employee['id'], $oldSourceId, $sourceId));
+            }
+            $result = array('ticket' => $this->find($id), 'history' => $this->history($id));
+            query('COMMIT');
+            return $result;
+        } catch (Throwable $error) {
+            @pg_query_params(db(), 'ROLLBACK', array());
+            throw $error;
         }
-        if (!pg_fetch_assoc(query('SELECT id FROM sources WHERE id=$1', array($sourceId)))) {
-            respond(400, array('error' => 'invalid_source', 'message' => 'Источник не найден'));
-        }
-        query('UPDATE tickets SET source_id=$1, updated_at=clock_timestamp() WHERE id=$2', array($sourceId, $id));
-        query('INSERT INTO ticket_history(ticket_id, employee_id, old_source_id, new_source_id) VALUES($1,$2,$3,$4)', array($id, $employee['id'], $ticket['source_id'], $sourceId));
-        return $this->find($id);
     }
 }

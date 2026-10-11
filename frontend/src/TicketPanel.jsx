@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 
 export default function TicketPanel({ employee, selectedId, sources, onChanged }) {
@@ -9,36 +9,62 @@ export default function TicketPanel({ employee, selectedId, sources, onChanged }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // Какая заявка выбрана сейчас: ответы по другим заявкам не применяются к карточке.
+  const selectedRef = useRef(selectedId);
+  // Номер актуальной загрузки: ответ применяется, только если он всё ещё последний.
+  const loadSeqRef = useRef(0);
+  // Синхронная защита от повторной отправки (state обновляется асинхронно).
+  const savingRef = useRef(false);
 
   useEffect(() => {
-    if (!selectedId) {
-      setTicket(null);
-      return;
-    }
-    setLoading(true);
+    selectedRef.current = selectedId;
+    const seq = ++loadSeqRef.current;
+    setTicket(null);
+    setHistory([]);
     setError('');
     setMessage('');
-    api(`/tickets/${selectedId}`).then(data => {
+    if (!selectedId) {
+      setLoading(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    api(`/tickets/${selectedId}`, { signal: controller.signal }).then(data => {
+      if (seq !== loadSeqRef.current) return;
       setTicket(data.ticket);
       setHistory(data.history);
       setSourceId(String(data.ticket.source?.id ?? ''));
-    }).catch(error => setError(error.message)).finally(() => setLoading(false));
-  }, [selectedId]);
+    }).catch(error => {
+      if (seq === loadSeqRef.current) setError(error.message);
+    }).finally(() => {
+      if (seq === loadSeqRef.current) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [selectedId, employee.id]);
 
   async function save() {
-    if (!ticket || saving) return;
+    if (!ticket || savingRef.current) return;
+    const ticketId = ticket.id;
+    savingRef.current = true;
     setSaving(true);
     setError('');
     setMessage('');
     try {
-      const data = await api(`/tickets/${ticket.id}/source`, { method: 'POST', body: JSON.stringify({ source_id: Number(sourceId) }) });
+      const data = await api(`/tickets/${ticketId}/source`, { method: 'POST', body: JSON.stringify({ source_id: Number(sourceId) }) });
+      // Список обновляем всегда: изменение на сервере уже произошло.
+      onChanged(data.ticket);
+      if (selectedRef.current !== ticketId) return;
+      // Ответ сохранения новее любой незавершённой загрузки этой же заявки.
+      loadSeqRef.current += 1;
+      setLoading(false);
       setTicket(data.ticket);
       setHistory(data.history);
+      setSourceId(String(data.ticket.source?.id ?? ''));
       setMessage('Источник сохранён');
-      onChanged(data.ticket);
     } catch (error) {
-      setError(error.message);
+      if (selectedRef.current === ticketId) setError(error.message);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -53,7 +79,7 @@ export default function TicketPanel({ employee, selectedId, sources, onChanged }
     {selectedId && !loading && ticket && <>
       <div className="panel-heading"><span className="muted">Заявка #{ticket.id}</span><h2>{ticket.title}</h2><p>{ticket.description}</p></div>
       <div className="source-box"><label htmlFor="source">Источник заявки</label>
-        {canEdit ? <div className="source-controls"><select id="source" value={sourceId} onChange={event => setSourceId(event.target.value)} disabled={saving}><option value="" disabled>Выберите источник</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select><button onClick={save} disabled={saving || !sourceId}>{saving ? 'Сохранение…' : 'Сохранить'}</button></div> : <p>{ticket.source?.name ?? 'Не указан'}</p>}
+        {canEdit ? <div className="source-controls"><select id="source" value={sourceId} onChange={event => setSourceId(event.target.value)} disabled={saving}><option value="" disabled>Не указан</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select><button onClick={save} disabled={saving || !sourceId}>{saving ? 'Сохранение…' : 'Сохранить'}</button></div> : <p>{ticket.source?.name ?? 'Не указан'}</p>}
         {ticket.status === 'archived' && <p className="muted">Архивная заявка доступна только для чтения.</p>}
         {message && <p className="success" role="status">{message}</p>}
       </div>
